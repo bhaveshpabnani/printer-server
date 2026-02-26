@@ -1,334 +1,394 @@
 /**
  * Thermal Printer Module
- * Handles printing to POS thermal printers using ESC/POS commands
+ * Handles printing to POS thermal printers using raw ESC/POS commands
+ * via @alexssmusica/node-printer (Windows printer driver)
  */
 
-const { ThermalPrinter, PrinterTypes } = require('node-thermal-printer');
+const nodePrinter = require('@alexssmusica/node-printer');
 const dotenv = require('dotenv');
 const chalk = require('chalk');
 
 dotenv.config();
 
-/**
- * Get printer configuration based on type
- */
-function getPrinterConfig() {
-  const type = process.env.PRINTER_TYPE || 'usb';
-  
-  const config = {
-    type: PrinterTypes.EPSON,
-    interface: type,
-    characterSet: 'SLOVENIA',
-    removeSpecialCharacters: false,
-    lineCharacter: '─',
-    options: {}
-  };
+// ─── ESC/POS Command Constants ───────────────────────────────────────────────
+const ESC = 0x1B;
+const GS  = 0x1D;
+const LF  = 0x0A;
 
-  switch (type) {
-    case 'usb':
-      config.options = {
-        vendorId: process.env.PRINTER_VENDOR_ID || undefined,
-        productId: process.env.PRINTER_PRODUCT_ID || undefined
-      };
-      break;
+const CMD = {
+  INIT:          [ESC, 0x40],
+  ALIGN_LEFT:    [ESC, 0x61, 0x00],
+  ALIGN_CENTER:  [ESC, 0x61, 0x01],
+  ALIGN_RIGHT:   [ESC, 0x61, 0x02],
+  BOLD_ON:       [ESC, 0x45, 0x01],
+  BOLD_OFF:      [ESC, 0x45, 0x00],
+  DOUBLE_HEIGHT: [GS,  0x21, 0x01],
+  DOUBLE_SIZE:   [GS,  0x21, 0x11],
+  NORMAL_SIZE:   [GS,  0x21, 0x00],
+  CUT_FULL:      [GS,  0x56, 0x00],
+  CUT_PARTIAL:   [GS,  0x56, 0x41, 0x00],
+  CASH_DRAWER:   [ESC, 0x70, 0x00, 0x19, 0xFA],
+  LINE_FEED:     [LF],
+};
 
-    case 'network':
-      config.interface = 'tcp';
-      config.options = {
-        host: process.env.PRINTER_IP,
-        port: parseInt(process.env.PRINTER_PORT) || 9100
-      };
-      break;
-
-    case 'windows':
-      config.interface = 'printer';
-      config.options = {
-        printerName: process.env.PRINTER_NAME || 'POS-80'
-      };
-      break;
-
-    default:
-      throw new Error(`Unknown printer type: ${type}`);
+// ─── ESC/POS Builder ─────────────────────────────────────────────────────────
+class EscPos {
+  constructor() {
+    this.bytes = [];
   }
 
-  return config;
-}
+  _add(arr)  { this.bytes.push(...arr); return this; }
 
-/**
- * Create printer instance
- */
-function createPrinterInstance() {
-  try {
-    const config = getPrinterConfig();
-    const printer = new ThermalPrinter(config);
-    return printer;
-  } catch (error) {
-    console.error(chalk.red('Error creating printer instance:'), error.message);
-    return null;
+  _text(str) {
+    for (let i = 0; i < str.length; i++) {
+      this.bytes.push(str.charCodeAt(i) & 0xFF);
+    }
+    return this;
+  }
+
+  init()         { return this._add(CMD.INIT); }
+  alignLeft()    { return this._add(CMD.ALIGN_LEFT); }
+  alignCenter()  { return this._add(CMD.ALIGN_CENTER); }
+  alignRight()   { return this._add(CMD.ALIGN_RIGHT); }
+  boldOn()       { return this._add(CMD.BOLD_ON); }
+  boldOff()      { return this._add(CMD.BOLD_OFF); }
+  normalSize()   { return this._add(CMD.NORMAL_SIZE); }
+  doubleHeight() { return this._add(CMD.DOUBLE_HEIGHT); }
+  doubleSize()   { return this._add(CMD.DOUBLE_SIZE); }
+  feed(n = 1)    { for (let i = 0; i < n; i++) this._add(CMD.LINE_FEED); return this; }
+  cutFull()      { return this._add(CMD.CUT_FULL); }
+  cutPartial()   { return this._add(CMD.CUT_PARTIAL); }
+  cashDrawer()   { return this._add(CMD.CASH_DRAWER); }
+
+  println(str = '') {
+    this._text(str);
+    this._add(CMD.LINE_FEED);
+    return this;
+  }
+
+  drawLine(char = '-', width = 48) {
+    return this.println(char.repeat(width));
+  }
+
+  // Left text | Right text padded to `width` total chars
+  leftRight(left, right, width = 48) {
+    const l = String(left);
+    const r = String(right);
+    const spaces = Math.max(1, width - l.length - r.length);
+    return this.println(l + ' '.repeat(spaces) + r);
+  }
+
+  toBuffer() {
+    return Buffer.from(this.bytes);
   }
 }
 
-/**
- * Format date/time for print (DD-MM-YYYY HH:MM AM/PM)
- */
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function formatDateTime(dateString) {
-  const date = new Date(dateString);
-  const day = String(date.getDate()).padStart(2, '0');
+  const date  = new Date(dateString);
+  const day   = String(date.getDate()).padStart(2, '0');
   const month = String(date.getMonth() + 1).padStart(2, '0');
-  const year = date.getFullYear();
+  const year  = date.getFullYear();
   const hours = date.getHours();
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  const ampm = hours >= 12 ? 'PM' : 'AM';
-  const displayHours = hours % 12 || 12;
-  
-  return `${day}-${month}-${year} ${String(displayHours).padStart(2, '0')}:${minutes} ${ampm}`;
+  const mins  = String(date.getMinutes()).padStart(2, '0');
+  const ampm  = hours >= 12 ? 'PM' : 'AM';
+  const h12   = String(hours % 12 || 12).padStart(2, '0');
+  return `${day}-${month}-${year} ${h12}:${mins} ${ampm}`;
 }
 
-/**
- * Format text to fit column width (truncate or pad)
- */
-function formatColumn(text, width, align = 'left') {
+function col(text, width, align = 'left') {
   const str = String(text || '').substring(0, width);
-  if (align === 'right') {
-    return str.padStart(width, ' ');
-  } else if (align === 'center') {
-    const padding = Math.floor((width - str.length) / 2);
-    return ' '.repeat(padding) + str + ' '.repeat(width - padding - str.length);
+  if (align === 'right')  return str.padStart(width, ' ');
+  if (align === 'center') {
+    const pad = Math.floor((width - str.length) / 2);
+    return ' '.repeat(pad) + str + ' '.repeat(width - pad - str.length);
   }
   return str.padEnd(width, ' ');
 }
 
-/**
- * Create a two-column row for 48 character line (80mm printer)
- */
-function createTwoColumnLine(left, right, totalWidth = 48) {
-  const leftStr = String(left);
-  const rightStr = String(right);
-  const spaces = totalWidth - leftStr.length - rightStr.length;
-  return leftStr + ' '.repeat(Math.max(0, spaces)) + rightStr;
+function getPrinterName() {
+  return (process.env.PRINTER_NAME || '80mm Series Printer').replace(/^"|"$/g, '');
+}
+
+function sendToPrinter(buffer) {
+  return new Promise((resolve, reject) => {
+    nodePrinter.printDirect({
+      data:    buffer,
+      printer: getPrinterName(),
+      type:    'RAW',
+      success: (jobID) => {
+        console.log(chalk.gray(`   Print job queued (ID: ${jobID})`));
+        resolve(true);
+      },
+      error: (err) => reject(new Error(err))
+    });
+  });
 }
 
 /**
- * Print order to thermal printer (80mm format - 48 chars width)
+ * Get sorted unique kitchen numbers from a list of items.
+ * Items without a kitchen_number (null/undefined) are grouped under kitchen null.
  */
-async function printOrder(order, items, copyNumber = 1, totalCopies = 1) {
-  const printer = createPrinterInstance();
-  
-  if (!printer) {
-    console.error(chalk.red('❌ Failed to create printer instance'));
-    return false;
-  }
+function getUniqueKitchens(items) {
+  const kitchens = new Set(items.map(i => i.kitchen_number ?? null));
+  // Sort: numbered kitchens first (ascending), then null at end
+  return [...kitchens].sort((a, b) => {
+    if (a === null && b === null) return 0;
+    if (a === null) return 1;
+    if (b === null) return -1;
+    return a - b;
+  });
+}
 
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+/**
+ * Print one kitchen slip.
+ *
+ * @param {object}      order         - The order row from DB
+ * @param {object[]}    items         - All order_items for this order
+ * @param {number|null} kitchenNumber - Which kitchen to print for (null = unassigned)
+ * @param {number}      kitchenIndex  - 1-based index among kitchens being printed
+ * @param {number}      totalKitchens - Total number of kitchen slips for this order
+ * @param {boolean}     openDrawer    - Whether to open cash drawer on this slip
+ */
+async function printKitchenSlip(order, items, kitchenNumber, kitchenIndex, totalKitchens, openDrawer = false) {
   try {
-    printer.clear();
+    // Filter items for this kitchen
+    const kitchenItems = items.filter(i =>
+      kitchenNumber === null
+        ? (i.kitchen_number === null || i.kitchen_number === undefined)
+        : i.kitchen_number === kitchenNumber
+    );
 
-    // Initialize printer
-    printer.alignLeft();
-    printer.setTextNormal();
-
-    // TOP HEADER: Date and Sales Receipt on same line
-    const dateTimeStr = formatDateTime(order.created_at);
-    printer.leftRight(dateTimeStr, `Sales Receipt #${order.order_number}`);
-    printer.println(`Store: 1`);
-    printer.newLine();
-
-    // BRAND SECTION (Centered & Bold)
-    printer.alignCenter();
-    
-    // REPRINTED indicator (if this is a reprint/copy > 1)
-    if (copyNumber > 1 || totalCopies > 1) {
-      printer.bold(true);
-      printer.println('REPRINTED');
-      printer.bold(false);
+    if (kitchenItems.length === 0) {
+      console.log(chalk.yellow(`   ⚠️  No items for kitchen ${kitchenNumber ?? 'unassigned'}, skipping slip`));
+      return true;
     }
-    
-    // Store Name (Bold - matching web print)
-    printer.bold(true);
-    printer.println('ASTHA HJB Canteen');
-    printer.bold(false);
-    
-    // Address
-    printer.println('HJB Hall, IIT Kharagpur');
-    printer.println('West Bengal');
-    printer.println('+91-9333190224');
-    printer.newLine();
 
-    // Divider
-    printer.drawLine();
-    printer.newLine();
+    const doc = new EscPos();
+    doc.init();
 
-    // TABLE INFO (if dine-in)
+    // ── Header: Date | Receipt# ───────────────────────────────────────────
+    doc.alignLeft().normalSize();
+    doc.leftRight(formatDateTime(order.created_at), `Receipt #${order.order_number}`);
+    doc.println('Store: 1');
+    doc.feed();
+
+    // ── Brand block ───────────────────────────────────────────────────────
+    doc.alignCenter();
+    doc.boldOn().println('ASTHA HJB Canteen').boldOff();
+    doc.println('HJB Hall, IIT Kharagpur');
+    doc.println('West Bengal');
+    doc.println('+91-9333190224');
+    doc.feed();
+
+    // ── Kitchen banner ────────────────────────────────────────────────────
+    doc.alignLeft().drawLine('─');
+    doc.alignCenter();
+    doc.boldOn();
+    if (kitchenNumber !== null) {
+      doc.println(`KITCHEN ${kitchenNumber}`);
+    } else {
+      doc.println('KITCHEN (UNASSIGNED)');
+    }
+    // Show slip counter if more than one kitchen
+    if (totalKitchens > 1) {
+      doc.println(`Slip ${kitchenIndex} of ${totalKitchens}`);
+    }
+    doc.boldOff();
+    doc.alignLeft().drawLine('─');
+    doc.feed();
+
+    // ── Table number (dine-in) ────────────────────────────────────────────
     if (order.order_type !== 'delivery' && order.table_number) {
-      printer.alignCenter();
-      printer.bold(true);
-      printer.println(`TABLE ${order.table_number}`);
-      printer.bold(false);
-      printer.newLine();
+      doc.alignCenter().boldOn().println(`TABLE ${order.table_number}`).boldOff();
+      doc.feed();
     }
 
-    // ITEMS TABLE HEADER (48 char layout for 80mm: 21 + 7 + 10 + 10 = 48)
-    // Matches web print: 45% 15% 20% 20%
-    printer.alignLeft();
-    const headerLine = formatColumn('Item Name', 21) + 
-                       formatColumn('Qty', 7, 'right') + 
-                       formatColumn('Price', 10, 'right') + 
-                       formatColumn('Ext Price', 10, 'right');
-    printer.println(headerLine);
-    printer.drawLine();
+    // ── Items table header (48 chars: 21 + 7 + 10 + 10) ──────────────────
+    doc.alignLeft();
+    doc.println(
+      col('Item Name', 21) +
+      col('Qty',        7, 'right') +
+      col('Price',     10, 'right') +
+      col('Total',     10, 'right')
+    );
+    doc.drawLine('─');
 
-    // ITEMS
-    let subtotal = 0;
-    items.forEach((item) => {
-      const itemName = formatColumn(item.item_name || 'Item', 21);
-      const qty = formatColumn(String(item.quantity), 7, 'right');
-      const priceFormatted = item.item_price.toFixed(2).replace(/\.?0+$/, '');
-      const price = formatColumn(priceFormatted, 10, 'right');
-      const extPriceFormatted = (item.item_price * item.quantity).toFixed(2).replace(/\.?0+$/, '');
-      const extPrice = formatColumn(extPriceFormatted, 10, 'right');
-      
-      const itemLine = `${itemName}${qty}${price}${extPrice}`;
-      printer.println(itemLine);
-      
-      subtotal += (item.item_price * item.quantity);
+    // ── Line items (only this kitchen's items) ────────────────────────────
+    let kitchenSubtotal = 0;
+
+    kitchenItems.forEach((item) => {
+      const extPrice = item.item_price * item.quantity;
+      kitchenSubtotal += extPrice;
+
+      doc.println(
+        col(item.item_name || 'Item', 21) +
+        col(String(item.quantity),    7, 'right') +
+        col(item.item_price.toFixed(2), 10, 'right') +
+        col(extPrice.toFixed(2),      10, 'right')
+      );
+
+      // Overflow for long names
+      if ((item.item_name || '').length > 21) {
+        doc.println('  ' + item.item_name.substring(21));
+      }
     });
 
-    printer.newLine();
+    doc.feed();
 
-    // TOTALS SECTION
-    printer.alignLeft();
-    const serviceCharges = subtotal * 0.02;
-    const total = subtotal + serviceCharges;
-    
-    printer.println(createTwoColumnLine('Subtotal:', subtotal.toFixed(2)));
-    printer.println(createTwoColumnLine('Service Charges 2%:', serviceCharges.toFixed(2)));
-    
-    // Payment method
-    const paymentMethod = order.payment_method === 'cash' ? 'Cash' : 'Online';
-    printer.println(createTwoColumnLine(`${paymentMethod}:`, total.toFixed(2)));
-    
-    printer.newLine();
-    printer.drawLine();
+    // ── Kitchen subtotal (only shown if multi-kitchen order) ──────────────
+    if (totalKitchens > 1) {
+      doc.alignLeft().drawLine('-');
+      doc.leftRight(`Kitchen ${kitchenNumber ?? 'Unassigned'} subtotal:`, kitchenSubtotal.toFixed(2));
+      doc.feed();
+    }
 
-    // FOOTER
-    printer.alignCenter();
-    printer.newLine();
-    printer.println('Thanks for dining with us!');
-    printer.newLine();
+    // ── Full order totals (printed on EVERY slip so each kitchen has context) ──
+    doc.alignLeft().drawLine('─');
 
-    // Order Type indicator at bottom
-    printer.alignCenter();
-    printer.setTextSize(0, 0);
+    const allSubtotal    = items.reduce((sum, i) => sum + (i.item_price * i.quantity), 0);
+    const serviceCharge  = allSubtotal * 0.02;
+    const grandTotal     = allSubtotal + serviceCharge;
+    const payLabel       = order.payment_method === 'cash' ? 'Cash' : 'Online';
+
+    doc.leftRight('Order Subtotal:', allSubtotal.toFixed(2));
+    doc.leftRight('Service Charges (2%):', serviceCharge.toFixed(2));
+    doc.boldOn();
+    doc.leftRight(`${payLabel} (Total):`, grandTotal.toFixed(2));
+    doc.boldOff();
+
+    doc.feed();
+    doc.alignLeft().drawLine('─');
+
+    // ── Footer ────────────────────────────────────────────────────────────
+    doc.alignCenter().feed();
+    doc.println('Thanks for dining with us!');
+    doc.feed();
+
     if (order.order_type === 'delivery') {
-      printer.println('DELIVERY ORDER');
-    }
-    printer.newLine();
-
-    // Add spacing before cut
-    printer.newLine();
-    printer.newLine();
-
-    // Cut paper (partial cut)
-    printer.cut();
-
-    // Open cash drawer if enabled and payment is cash
-    if (process.env.OPEN_CASH_DRAWER === 'true' && 
-        order.payment_method === 'cash' && 
-        copyNumber === 1) {
-      printer.openCashDrawer();
+      doc.boldOn().println('DELIVERY ORDER').boldOff();
     }
 
-    // Execute print
-    await printer.execute();
-    
+    doc.feed(3);
+
+    // ── Cut + optional cash drawer (only on first slip) ───────────────────
+    doc.cutPartial();
+
+    if (openDrawer) {
+      doc.cashDrawer();
+    }
+
+    await sendToPrinter(doc.toBuffer());
     return true;
 
   } catch (error) {
-    console.error(chalk.red('❌ Print error:'), error.message);
-    
-    // Try to provide helpful error messages
-    if (error.message.includes('LIBUSB')) {
-      console.error(chalk.yellow('\n💡 USB Printer Tip:'));
-      console.error(chalk.yellow('   - Make sure printer is connected via USB'));
-      console.error(chalk.yellow('   - Check if printer is powered on'));
-      console.error(chalk.yellow('   - Try running as Administrator'));
-    } else if (error.message.includes('ECONNREFUSED') || error.message.includes('ETIMEDOUT')) {
-      console.error(chalk.yellow('\n💡 Network Printer Tip:'));
-      console.error(chalk.yellow('   - Check IP address in .env file'));
-      console.error(chalk.yellow('   - Ensure printer is on the same network'));
-      console.error(chalk.yellow('   - Verify port number (usually 9100)'));
-    } else if (error.message.includes('printer')) {
-      console.error(chalk.yellow('\n💡 Windows Printer Tip:'));
-      console.error(chalk.yellow('   - Check printer name matches exactly'));
-      console.error(chalk.yellow('   - Run: npm run test-print to see available printers'));
-    }
-    
+    console.error(chalk.red(`❌ Print error (kitchen ${kitchenNumber ?? 'unassigned'}):`, error.message));
+    _printTips(error.message);
     return false;
   }
 }
 
 /**
- * Test printer connection
+ * Main print entry point.
+ * Splits items by kitchen_number and sends one slip per kitchen.
+ *
+ * @param {object}   order  - Order row from DB
+ * @param {object[]} items  - All order_items rows for this order
+ * @returns {{ success: boolean, kitchens: number[] }}
  */
-async function testPrinter() {
-  const printer = createPrinterInstance();
-  
-  if (!printer) {
-    return false;
+async function printOrder(order, items) {
+  const kitchens     = getUniqueKitchens(items);
+  const totalKitchens = kitchens.length;
+
+  console.log(chalk.blue(`   Kitchens in this order: [${kitchens.map(k => k ?? 'unassigned').join(', ')}]`));
+  console.log(chalk.blue(`   Printing ${totalKitchens} slip(s)...`));
+
+  let allSuccess = true;
+
+  for (let i = 0; i < kitchens.length; i++) {
+    const kitchenNumber = kitchens[i];
+    const kitchenIndex  = i + 1;
+
+    // Open cash drawer only on the first slip, and only if configured + cash payment
+    const openDrawer = (
+      process.env.OPEN_CASH_DRAWER === 'true' &&
+      order.payment_method === 'cash' &&
+      kitchenIndex === 1
+    );
+
+    console.log(chalk.gray(`   → Slip ${kitchenIndex}/${totalKitchens}: Kitchen ${kitchenNumber ?? 'unassigned'}`));
+
+    const success = await printKitchenSlip(
+      order,
+      items,
+      kitchenNumber,
+      kitchenIndex,
+      totalKitchens,
+      openDrawer
+    );
+
+    if (success) {
+      console.log(chalk.green(`     ✓ Kitchen ${kitchenNumber ?? 'unassigned'} slip sent`));
+    } else {
+      console.error(chalk.red(`     ✗ Kitchen ${kitchenNumber ?? 'unassigned'} slip failed`));
+      allSuccess = false;
+    }
+
+    // Small gap between slips so printer doesn't choke
+    if (i < kitchens.length - 1) {
+      await new Promise(r => setTimeout(r, 500));
+    }
   }
 
-  try {
-    printer.clear();
-    
-    // Test receipt format
-    printer.alignLeft();
-    const dateTimeStr = formatDateTime(new Date().toISOString());
-    printer.println(dateTimeStr);
-    printer.println('Store: 1');
-    printer.newLine();
-    
-    printer.alignRight();
-    printer.bold(true);
-    printer.println('PRINTER TEST');
-    printer.bold(false);
-    printer.newLine();
-    
-    printer.alignCenter();
-    printer.bold(true);
-    printer.setTextDoubleHeight();
-    printer.println('ASTHA HJB Canteen');
-    printer.setTextNormal();
-    printer.bold(false);
-    printer.println('HJB Hall, IIT Kharagpur');
-    printer.println('West Bengal');
-    printer.println('+91-9333190224');
-    printer.newLine();
-    
-    printer.drawLine();
-    printer.newLine();
-    
-    printer.alignLeft();
-    printer.println(`Printer Type: ${process.env.PRINTER_TYPE}`);
-    printer.println(`Connection: SUCCESS`);
-    printer.newLine();
-    
-    printer.drawLine();
-    printer.alignCenter();
-    printer.bold(true);
-    printer.println('CONNECTION SUCCESS!');
-    printer.bold(false);
-    printer.newLine();
-    printer.println('58mm Thermal Printer');
-    printer.println('ESC/POS Format');
-    
-    printer.newLine();
-    printer.newLine();
-    printer.cut();
+  return { success: allSuccess, kitchens };
+}
 
-    await printer.execute();
+/**
+ * Print a connection test receipt
+ */
+async function testPrinter() {
+  try {
+    const doc = new EscPos();
+    doc.init();
+
+    doc.alignLeft().normalSize();
+    doc.println(formatDateTime(new Date().toISOString()));
+    doc.println('Store: 1');
+    doc.feed();
+
+    doc.alignCenter();
+    doc.boldOn().println('*** PRINTER TEST ***').boldOff();
+    doc.feed();
+
+    doc.boldOn().println('ASTHA HJB Canteen').boldOff();
+    doc.println('HJB Hall, IIT Kharagpur');
+    doc.println('West Bengal');
+    doc.println('+91-9333190224');
+    doc.feed();
+
+    doc.alignLeft().drawLine('─');
+    doc.feed();
+
+    doc.println(`Printer Name : ${getPrinterName()}`);
+    doc.println(`Connection   : SUCCESS`);
+    doc.feed();
+
+    doc.alignLeft().drawLine('─');
+    doc.alignCenter();
+    doc.boldOn().println('CONNECTION SUCCESS!').boldOff();
+    doc.println('80mm Thermal  |  ESC/POS  |  RAW mode');
+    doc.feed(3);
+    doc.cutPartial();
+
+    await sendToPrinter(doc.toBuffer());
     return true;
 
   } catch (error) {
     console.error(chalk.red('Printer test failed:'), error.message);
+    _printTips(error.message);
     return false;
   }
 }
@@ -341,64 +401,85 @@ function listWindowsPrinters() {
     console.log(chalk.yellow('   (Windows printer listing only available on Windows)'));
     return;
   }
-
   try {
-    const { execSync } = require('child_process');
-    const output = execSync('wmic printer get name', { encoding: 'utf-8' });
-    const printers = output
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line && line !== 'Name');
-    
-    if (printers.length === 0) {
+    const printers = nodePrinter.getPrinters();
+    if (!printers || printers.length === 0) {
       console.log(chalk.yellow('   No printers found'));
     } else {
-      printers.forEach((printer, index) => {
-        console.log(chalk.white(`   ${index + 1}. ${printer}`));
+      printers.forEach((p, i) => {
+        const mark = p.isDefault ? chalk.green(' ★ default') : '';
+        console.log(chalk.white(`   ${i + 1}. ${p.name}${mark}`));
       });
     }
-  } catch (error) {
-    console.error(chalk.red('   Error listing printers:'), error.message);
+  } catch {
+    try {
+      const { execSync } = require('child_process');
+      const output = execSync('wmic printer get name', { encoding: 'utf-8' });
+      output.split('\n')
+        .map(l => l.trim())
+        .filter(l => l && l !== 'Name')
+        .forEach((name, i) => console.log(chalk.white(`   ${i + 1}. ${name}`)));
+    } catch (e) {
+      console.error(chalk.red('   Error listing printers:'), e.message);
+    }
   }
 }
 
 /**
- * Print a sample order (for testing)
+ * Print a sample order (for testing kitchen-split logic)
  */
 async function printSampleOrder() {
   const sampleOrder = {
-    order_number: 101,
-    table_number: 5,
-    order_type: 'dine_in',
-    status: 'placed',
+    order_number:   101,
+    table_number:   5,
+    order_type:     'dine_in',
+    status:         'placed',
+    payment_method: 'cash',
     payment_status: 'paid',
-    total_amount: 450.00,
-    created_at: new Date().toISOString()
+    total_amount:   450.00,
+    created_at:     new Date().toISOString()
   };
 
+  // Items spread across 3 kitchens + one unassigned
   const sampleItems = [
-    { item_name: 'Veg Biryani', quantity: 2, item_price: 120.00 },
-    { item_name: 'Paneer Butter Masala', quantity: 1, item_price: 150.00 },
-    { item_name: 'Roti', quantity: 3, item_price: 15.00 },
-    { item_name: 'Cold Coffee', quantity: 1, item_price: 60.00 }
+    { item_name: 'Veg Biryani',          quantity: 2, item_price: 120.00, kitchen_number: 1 },
+    { item_name: 'Paneer Butter Masala', quantity: 1, item_price: 150.00, kitchen_number: 1 },
+    { item_name: 'Roti',                 quantity: 3, item_price:  15.00, kitchen_number: 2 },
+    { item_name: 'Garlic Naan',          quantity: 2, item_price:  25.00, kitchen_number: 2 },
+    { item_name: 'Cold Coffee',          quantity: 1, item_price:  60.00, kitchen_number: 3 },
+    { item_name: 'Water Bottle',         quantity: 2, item_price:  20.00, kitchen_number: null },
   ];
 
-  console.log(chalk.cyan('\n📄 Printing sample order...\n'));
-  const success = await printOrder(sampleOrder, sampleItems);
-  
-  if (success) {
-    console.log(chalk.green('\n✅ Sample order printed successfully!'));
+  console.log(chalk.cyan('\n📄 Printing sample order (multi-kitchen)...\n'));
+  const result = await printOrder(sampleOrder, sampleItems);
+
+  if (result.success) {
+    console.log(chalk.green(`\n✅ Sample order printed (${result.kitchens.length} kitchen slips)`));
   } else {
-    console.log(chalk.red('\n❌ Failed to print sample order'));
+    console.log(chalk.red('\n❌ One or more kitchen slips failed'));
   }
-  
-  return success;
+
+  return result.success;
 }
 
+// ─── Internal ─────────────────────────────────────────────────────────────────
+function _printTips(message = '') {
+  if (message.toLowerCase().includes('printer')) {
+    console.error(chalk.yellow('\n💡 Windows Printer Tip:'));
+    console.error(chalk.yellow('   - Open "Devices & Printers" and copy the exact name'));
+    console.error(chalk.yellow(`   - Current name in .env: "${getPrinterName()}"`));
+    console.error(chalk.yellow('   - Run: npm run test-print to list available printers'));
+  } else if (message.includes('ECONNREFUSED') || message.includes('ETIMEDOUT')) {
+    console.error(chalk.yellow('\n💡 Network Tip:'));
+    console.error(chalk.yellow('   - Check IP/port in .env'));
+  }
+}
+
+// ─── Exports ──────────────────────────────────────────────────────────────────
 module.exports = {
   printOrder,
   testPrinter,
   listWindowsPrinters,
   printSampleOrder,
-  createPrinterInstance
+  getUniqueKitchens,
 };
