@@ -209,12 +209,14 @@ async function printKitchenSlip(order, items, kitchenNumber, kitchenIndex, total
 
     // ── Items table header (48 chars: 21 + 7 + 10 + 10) ──────────────────
     doc.alignLeft();
+    doc.boldOn();
     doc.println(
       col('Item Name', 21) +
       col('Qty',        7, 'right') +
       col('Price',     10, 'right') +
       col('Total',     10, 'right')
     );
+    doc.boldOff();
     doc.drawLine('─');
 
     // ── Line items (only this kitchen's items) ────────────────────────────
@@ -224,16 +226,20 @@ async function printKitchenSlip(order, items, kitchenNumber, kitchenIndex, total
       const extPrice = item.item_price * item.quantity;
       kitchenSubtotal += extPrice;
 
+      doc.boldOn();
       doc.println(
         col(item.item_name || 'Item', 21) +
         col(String(item.quantity),    7, 'right') +
         col(item.item_price.toFixed(2), 10, 'right') +
         col(extPrice.toFixed(2),      10, 'right')
       );
+      doc.boldOff();
 
       // Overflow for long names
       if ((item.item_name || '').length > 21) {
+        doc.boldOn();
         doc.println('  ' + item.item_name.substring(21));
+        doc.boldOff();
       }
     });
 
