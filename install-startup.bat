@@ -67,7 +67,7 @@ set "RUNNER_BAT=%PROJECT_DIR%\run-server-hidden.bat"
 (
 echo @echo off
 echo cd /d "%PROJECT_DIR%"
-echo "%NODE_EXE%" "%PROJECT_DIR%\index.js" >> "%LOG_FILE%" 2^>^&1
+echo "%NODE_EXE%" "%PROJECT_DIR%\index.js" ^>^> "%LOG_FILE%" 2^>^&1
 ) > "%RUNNER_BAT%"
 
 :: ── Build the schtasks XML for full control ───────────────────────────────────
