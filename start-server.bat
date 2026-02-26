@@ -19,7 +19,7 @@ if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
 
 if "%CHOICE%"=="1" (
     echo.
-    echo Starting server in foreground (Ctrl+C to stop)...
+    echo Starting server in foreground ^(Ctrl+C to stop^)...
     echo.
     cd /d "%PROJECT_DIR%"
     call npm start
