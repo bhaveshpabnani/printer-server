@@ -68,14 +68,21 @@ async function fetchOrderDetails(orderId) {
     if (orderErr) throw orderErr;
     if (!order)   return null;
 
+    // Join menu_items to get kitchen_number (stored on menu_items, not order_items)
     const { data: items, error: itemsErr } = await supabase
       .from('order_items')
-      .select('*')
+      .select('*, menu_items(kitchen_number)')
       .eq('order_id', orderId);
 
     if (itemsErr) throw itemsErr;
 
-    return { order, items: items || [] };
+    // Flatten kitchen_number onto each item row
+    const flatItems = (items || []).map(item => ({
+      ...item,
+      kitchen_number: item.menu_items?.kitchen_number ?? null,
+    }));
+
+    return { order, items: flatItems };
   } catch (error) {
     console.error(chalk.red('❌ Error fetching order details:'), error.message);
     return null;

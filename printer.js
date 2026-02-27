@@ -207,6 +207,18 @@ async function printKitchenSlip(order, items, kitchenNumber, kitchenIndex, total
       doc.feed();
     }
 
+    // ── Customer details ──────────────────────────────────────────────────
+    doc.alignLeft();
+    if (order.customer_name) {
+      doc.leftRight('Customer:', order.customer_name);
+    }
+    if (order.customer_phone) {
+      doc.leftRight('Phone:', order.customer_phone);
+    }
+    if (order.customer_name || order.customer_phone) {
+      doc.feed();
+    }
+
     // ── Items table header (48 chars: 21 + 7 + 10 + 10) ──────────────────
     doc.alignLeft();
     doc.boldOn();
