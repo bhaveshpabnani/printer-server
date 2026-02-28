@@ -107,18 +107,55 @@ function col(text, width, align = 'left') {
   return str.padEnd(width, ' ');
 }
 
-function getPrinterName() {
-  return (process.env.PRINTER_NAME || '80mm Series Printer').replace(/^"|"$/g, '');
+function getDefaultPrinterName() {
+  return (process.env.DEFAULT_PRINTER || process.env.PRINTER_NAME || '80mm Series Printer').replace(/^"|"$/g, '');
 }
 
-function sendToPrinter(buffer) {
+/**
+ * Resolve the printer name for a specific kitchen.
+ * Lookup order:
+ *   1. KITCHEN_{N}_PRINTER env var (e.g. KITCHEN_1_PRINTER)
+ *   2. DEFAULT_PRINTER / PRINTER_NAME (backwards-compat fallback)
+ *
+ * @param {number|null} kitchenNumber
+ * @returns {string} Windows printer name
+ */
+function getKitchenPrinterName(kitchenNumber) {
+  if (kitchenNumber != null) {
+    const specific = process.env[`KITCHEN_${kitchenNumber}_PRINTER`];
+    if (specific) return specific.replace(/^"|"$/g, '');
+  }
+  return getDefaultPrinterName();
+}
+
+/**
+ * Returns a map of { kitchenNumber → printerName } for all KITCHEN_N_PRINTER
+ * env vars that are set, plus an entry for the default printer.
+ * @returns {Map<number|null, string>}
+ */
+function getKitchenPrinterMap() {
+  const map = new Map();
+  // Scan env for KITCHEN_N_PRINTER keys
+  for (const [key, value] of Object.entries(process.env)) {
+    const match = key.match(/^KITCHEN_(\d+)_PRINTER$/);
+    if (match && value) {
+      map.set(parseInt(match[1], 10), value.replace(/^"|"$/g, ''));
+    }
+  }
+  // Always include the default
+  map.set(null, getDefaultPrinterName());
+  return map;
+}
+
+function sendToPrinter(buffer, printerName) {
+  const name = (printerName || getDefaultPrinterName());
   return new Promise((resolve, reject) => {
     nodePrinter.printDirect({
       data:    buffer,
-      printer: getPrinterName(),
+      printer: name,
       type:    'RAW',
       success: (jobID) => {
-        console.log(chalk.gray(`   Print job queued (ID: ${jobID})`));
+        console.log(chalk.gray(`   Print job queued on "${name}" (ID: ${jobID})`));
         resolve(true);
       },
       error: (err) => reject(new Error(err))
@@ -299,12 +336,12 @@ async function printKitchenSlip(order, items, kitchenNumber, kitchenIndex, total
       doc.cashDrawer();
     }
 
-    await sendToPrinter(doc.toBuffer());
+    await sendToPrinter(doc.toBuffer(), getKitchenPrinterName(kitchenNumber));
     return true;
 
   } catch (error) {
     console.error(chalk.red(`❌ Print error (kitchen ${kitchenNumber ?? 'unassigned'}):`, error.message));
-    _printTips(error.message);
+    _printTips(error.message, kitchenNumber);
     return false;
   }
 }
@@ -365,9 +402,11 @@ async function printOrder(order, items) {
 }
 
 /**
- * Print a connection test receipt
+ * Print a connection test receipt to a specific printer.
+ * If no printerName is given, uses the default printer.
  */
-async function testPrinter() {
+async function testPrinter(printerName) {
+  const name = printerName || getDefaultPrinterName();
   try {
     const doc = new EscPos();
     doc.init();
@@ -390,7 +429,7 @@ async function testPrinter() {
     doc.alignLeft().drawLine('─');
     doc.feed();
 
-    doc.println(`Printer Name : ${getPrinterName()}`);
+    doc.println(`Printer Name : ${name}`);
     doc.println(`Connection   : SUCCESS`);
     doc.feed();
 
@@ -401,14 +440,42 @@ async function testPrinter() {
     doc.feed(3);
     doc.cutPartial();
 
-    await sendToPrinter(doc.toBuffer());
+    await sendToPrinter(doc.toBuffer(), name);
     return true;
 
   } catch (error) {
-    console.error(chalk.red('Printer test failed:'), error.message);
+    console.error(chalk.red(`Printer test failed [${name}]:`), error.message);
     _printTips(error.message);
     return false;
   }
+}
+
+/**
+ * Test every unique printer configured (all KITCHEN_N_PRINTER + default).
+ * Returns true only if ALL printers pass.
+ */
+async function testAllPrinters() {
+  const map    = getKitchenPrinterMap();
+  // Deduplicate by printer name — no point sending two test pages to the same device
+  const unique = new Map();
+  for (const [kitchen, name] of map) {
+    if (!unique.has(name)) unique.set(name, kitchen);
+  }
+
+  let allOk = true;
+  for (const [name] of unique) {
+    console.log(chalk.blue(`   Testing printer: "${name}"...`));
+    const ok = await testPrinter(name);
+    if (ok) {
+      console.log(chalk.green(`   ✓ "${name}" OK`));
+    } else {
+      console.log(chalk.red(`   ✗ "${name}" FAILED — check PRINTER_NAME / KITCHEN_N_PRINTER in .env`));
+      allOk = false;
+    }
+    // Small gap between test pages
+    if (unique.size > 1) await new Promise(r => setTimeout(r, 600));
+  }
+  return allOk;
 }
 
 /**
@@ -481,11 +548,14 @@ async function printSampleOrder() {
 }
 
 // ─── Internal ─────────────────────────────────────────────────────────────────
-function _printTips(message = '') {
-  if (message.toLowerCase().includes('printer')) {
+function _printTips(message = '', kitchenNumber = null) {
+  if (message.toLowerCase().includes('printer') || message.toLowerCase().includes('cannot')) {
+    const envKey = kitchenNumber != null ? `KITCHEN_${kitchenNumber}_PRINTER` : 'DEFAULT_PRINTER';
+    const currentName = kitchenNumber != null ? getKitchenPrinterName(kitchenNumber) : getDefaultPrinterName();
     console.error(chalk.yellow('\n💡 Windows Printer Tip:'));
-    console.error(chalk.yellow('   - Open "Devices & Printers" and copy the exact name'));
-    console.error(chalk.yellow(`   - Current name in .env: "${getPrinterName()}"`));
+    console.error(chalk.yellow('   - Open "Devices & Printers" and copy the exact printer name'));
+    console.error(chalk.yellow(`   - Set in .env: ${envKey}=<exact name>`));
+    console.error(chalk.yellow(`   - Current value: "${currentName}"`))
     console.error(chalk.yellow('   - Run: npm run test-print to list available printers'));
   } else if (message.includes('ECONNREFUSED') || message.includes('ETIMEDOUT')) {
     console.error(chalk.yellow('\n💡 Network Tip:'));
@@ -497,7 +567,10 @@ function _printTips(message = '') {
 module.exports = {
   printOrder,
   testPrinter,
+  testAllPrinters,
   listWindowsPrinters,
   printSampleOrder,
   getUniqueKitchens,
+  getKitchenPrinterName,
+  getKitchenPrinterMap,
 };

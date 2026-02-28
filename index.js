@@ -11,7 +11,7 @@ const { createClient } = require('@supabase/supabase-js');
 const dotenv   = require('dotenv');
 const chalk    = require('chalk');
 const notifier = require('node-notifier');
-const { printOrder, testPrinter, listWindowsPrinters, getUniqueKitchens } = require('./printer');
+const { printOrder, testAllPrinters, listWindowsPrinters, getUniqueKitchens, getKitchenPrinterName, getKitchenPrinterMap } = require('./printer');
 
 dotenv.config();
 
@@ -22,7 +22,8 @@ const config = {
   autoPrintEnabled:     process.env.AUTO_PRINT_ENABLED === 'true',
   printOnPaymentStatus: process.env.PRINT_ON_PAYMENT_STATUS || 'paid',
   playSound:            process.env.PLAY_SOUND === 'true',
-  printerName:         (process.env.PRINTER_NAME || '80mm Series Printer').replace(/^"|"$/g, ''),
+  // Default printer — used for any kitchen that has no KITCHEN_N_PRINTER set
+  defaultPrinter:      (process.env.DEFAULT_PRINTER || process.env.PRINTER_NAME || '80mm Series Printer').replace(/^"|"$/g, ''),
 };
 
 if (!config.supabaseUrl || !config.supabaseKey) {
@@ -48,13 +49,23 @@ console.log(chalk.cyan.bold('\n╔═══════════════�
 console.log(chalk.cyan.bold('║   ASTHA HJB CANTEEN - Auto Print Server v2.2     ║'));
 console.log(chalk.cyan.bold('╚═══════════════════════════════════════════════════╝\n'));
 
-console.log(chalk.blue('🖨️  Printer Name:'),   chalk.white(config.printerName));
-console.log(chalk.blue('📡 Supabase URL:'),    chalk.white(config.supabaseUrl));
+console.log(chalk.blue('� Supabase URL:'),    chalk.white(config.supabaseUrl));
 console.log(chalk.blue('🔊 Sound Alerts:'),    config.playSound        ? chalk.green('✓ Enabled') : chalk.red('✗ Disabled'));
 console.log(chalk.blue('🎯 Auto-Print:'),      config.autoPrintEnabled ? chalk.green('✓ Enabled') : chalk.red('✗ Disabled'));
 console.log(chalk.blue('💳 Print Trigger:'),   chalk.white(`payment_status = "${config.printOnPaymentStatus}"`));
 console.log(chalk.blue('🍳 Slips per order:'), chalk.white('1 per unique kitchen_number in order_items'));
 console.log();
+
+// Show kitchen → printer routing table
+{
+  const map = getKitchenPrinterMap();
+  console.log(chalk.cyan('🖨️  Kitchen → Printer routing:'));
+  for (const [kitchen, printer] of map) {
+    const label = kitchen === null ? 'Default (unassigned)' : `Kitchen ${kitchen}`;
+    console.log(chalk.white(`   ${label.padEnd(22)} → "${printer}"` ));
+  }
+  console.log();
+}
 
 // ─── Fetch order with items ───────────────────────────────────────────────────
 async function fetchOrderDetails(orderId) {
@@ -68,21 +79,17 @@ async function fetchOrderDetails(orderId) {
     if (orderErr) throw orderErr;
     if (!order)   return null;
 
-    // Join menu_items to get kitchen_number (stored on menu_items, not order_items)
+    // Read kitchen_number directly from order_items — it was denormalized at
+    // order-insert time (item-level override OR category default already resolved).
+    // No join to menu_items or menu_categories needed.
     const { data: items, error: itemsErr } = await supabase
       .from('order_items')
-      .select('*, menu_items(kitchen_number)')
+      .select('id, item_name, item_price, quantity, kitchen_number')
       .eq('order_id', orderId);
 
     if (itemsErr) throw itemsErr;
 
-    // Flatten kitchen_number onto each item row
-    const flatItems = (items || []).map(item => ({
-      ...item,
-      kitchen_number: item.menu_items?.kitchen_number ?? null,
-    }));
-
-    return { order, items: flatItems };
+    return { order, items: items || [] };
   } catch (error) {
     console.error(chalk.red('❌ Error fetching order details:'), error.message);
     return null;
@@ -174,20 +181,20 @@ async function testSupabaseConnection() {
 
 // ─── Printer init ─────────────────────────────────────────────────────────────
 async function initializePrinter() {
-  console.log(chalk.blue('🔧 Initializing printer...\n'));
+  console.log(chalk.blue('🔧 Initializing printers...\n'));
 
   console.log(chalk.cyan('📋 Available Windows Printers:'));
   listWindowsPrinters();
   console.log();
 
-  console.log(chalk.blue('🧪 Testing printer connection...\n'));
-  const ok = await testPrinter();
+  console.log(chalk.blue('🧪 Testing all configured printers...\n'));
+  const ok = await testAllPrinters();
 
   if (ok) {
-    console.log(chalk.green.bold('✅ Printer test successful!\n'));
+    console.log(chalk.green.bold('\n✅ All printer test(s) successful!\n'));
   } else {
-    console.log(chalk.red.bold('❌ Printer test failed!'));
-    console.log(chalk.yellow('\n⚠️  Server will continue — check PRINTER_NAME in .env\n'));
+    console.log(chalk.red.bold('\n❌ One or more printer tests failed!'));
+    console.log(chalk.yellow('⚠️  Server will continue — fix KITCHEN_N_PRINTER / DEFAULT_PRINTER in .env\n'));
   }
 
   console.log(chalk.gray('─'.repeat(50)));
