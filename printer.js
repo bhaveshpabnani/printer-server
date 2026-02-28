@@ -306,11 +306,16 @@ async function printKitchenSlip(order, items, kitchenNumber, kitchenIndex, total
 
     const allSubtotal    = items.reduce((sum, i) => sum + (i.item_price * i.quantity), 0);
     const serviceCharge  = allSubtotal * 0.02;
-    const grandTotal     = allSubtotal + serviceCharge;
+    const deliveryCharge = order.order_type === 'delivery' && order.delivery_charge != null
+      ? Number(order.delivery_charge) : 0;
+    const grandTotal     = allSubtotal + serviceCharge + deliveryCharge;
     const payLabel       = order.payment_method === 'cash' ? 'Cash' : 'Online';
 
     doc.leftRight('Order Subtotal:', allSubtotal.toFixed(2));
     doc.leftRight('Service Charges (2%):', serviceCharge.toFixed(2));
+    if (deliveryCharge > 0) {
+      doc.leftRight('Delivery Charge:', deliveryCharge.toFixed(2));
+    }
     doc.boldOn();
     doc.leftRight(`${payLabel} (Total):`, grandTotal.toFixed(2));
     doc.boldOff();
@@ -318,14 +323,37 @@ async function printKitchenSlip(order, items, kitchenNumber, kitchenIndex, total
     doc.feed();
     doc.alignLeft().drawLine('─');
 
+    // ── Delivery address block ────────────────────────────────────────────
+    if (order.order_type === 'delivery') {
+      doc.boldOn().alignCenter().println('*** DELIVERY ORDER ***').boldOff();
+      doc.feed();
+      if (order.delivery_address) {
+        doc.alignLeft();
+        doc.boldOn().println('DELIVER TO:').boldOff();
+        // Word-wrap the address to 48 chars
+        const addr = String(order.delivery_address);
+        const words = addr.split(' ');
+        let line = '';
+        for (const word of words) {
+          if ((line + (line ? ' ' : '') + word).length > 46) {
+            doc.println(line);
+            line = word;
+          } else {
+            line = line ? `${line} ${word}` : word;
+          }
+        }
+        if (line) doc.println(line);
+        if (order.delivery_lat && order.delivery_lng) {
+          doc.println(`GPS: ${Number(order.delivery_lat).toFixed(5)}, ${Number(order.delivery_lng).toFixed(5)}`);
+        }
+        doc.feed();
+      }
+    }
+
     // ── Footer ────────────────────────────────────────────────────────────
     doc.alignCenter().feed();
     doc.println('Thanks for dining with us!');
     doc.feed();
-
-    if (order.order_type === 'delivery') {
-      doc.boldOn().println('DELIVERY ORDER').boldOff();
-    }
 
     doc.feed(3);
 
